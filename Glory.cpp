@@ -333,8 +333,150 @@
 //    return 0;
 //}
 
+// 2-3	CLI
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <regex>
+#include <functional>
 
+using namespace std;
 
+mutex mtx;
+condition_variable cv;
+queue<function<void()>> fgTasks;  // Foreground tasks
+atomic<bool> quit(false);
+atomic<int> bgTaskCount(0);  // Count of background tasks
+
+// Utility functions
+int gcd(int a, int b) {
+    while (b != 0) {
+        int t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+
+int countPrimes(int limit) {
+    vector<bool> sieve(limit + 1, true);
+    int count = 0;
+    for (int p = 2; p <= limit; p++) {
+        if (sieve[p]) {
+            count++;
+            for (int multiple = 2 * p; multiple <= limit; multiple += p)
+                sieve[multiple] = false;
+        }
+    }
+    return count;
+}
+
+long long sum(int n) {
+    long long total = 0;
+    for (int i = 1; i <= n; i++) {
+        total = (total + i) % 1000000;
+    }
+    return total;
+}
+
+void echo(const string& message) {
+    cout << message << endl;
+}
+
+void dummy() {}
+
+// Task execution
+void executeTask(const string& command, const vector<string>& args, bool isBackground) {
+    auto task = [command, args]() {
+        if (command == "echo" && !args.empty()) {
+            echo(args[0]);
+        }
+        else if (command == "dummy") {
+            dummy();
+        }
+        else if (command == "gcd" && args.size() >= 2) {
+            cout << "GCD: " << gcd(stoi(args[0]), stoi(args[1])) << endl;
+        }
+        else if (command == "prime" && !args.empty()) {
+            cout << "Primes count: " << countPrimes(stoi(args[0])) << endl;
+        }
+        else if (command == "sum" && !args.empty()) {
+            cout << "Sum: " << sum(stoi(args[0])) << endl;
+        }
+        };
+
+    if (isBackground) {
+        bgTaskCount++;
+        thread bgThread([task]() {
+            task();
+            bgTaskCount--;
+            });
+        bgThread.detach();
+        cout << "Running: [" << bgTaskCount.load() << "B]" << endl;
+    }
+    else {
+        lock_guard<mutex> lock(mtx);
+        fgTasks.push(task);
+        cv.notify_one();
+    }
+}
+
+// Foreground task processor
+void processForegroundTasks() {
+    while (!quit) {
+        function<void()> task;
+        {
+            unique_lock<mutex> lock(mtx);
+            cv.wait(lock, [] { return !fgTasks.empty() || quit; });
+            if (quit && fgTasks.empty()) break;
+            task = fgTasks.front();
+            fgTasks.pop();
+        }
+        task();
+    }
+    cout << "prompt> ...";
+}
+
+int main() {
+    ifstream file("commands.txt");
+    string line;
+
+    // Start the foreground task processor
+    thread fgThread(processForegroundTasks);
+
+    // Command parsing and dispatching
+    regex commandPattern(R"((\&)?(\w+)(?:\s+(\S+))*)");
+    while (getline(file, line)) {
+        smatch matches;
+        if (regex_match(line, matches, commandPattern)) {
+            bool isBackground = matches[1].matched;
+            string command = matches[2];
+            vector<string> args;
+            if (matches[3].matched) {
+                istringstream argStream(matches[3]);
+                string arg;
+                while (argStream >> arg) {
+                    args.push_back(arg);
+                }
+            }
+            executeTask(command, args, isBackground);
+        }
+        this_thread::sleep_for(chrono::seconds(1)); // Simulate command interval
+    }
+
+    // Clean up
+    quit = true;
+    cv.notify_all();
+    fgThread.join();
+    return 0;
+}
 
 
 
