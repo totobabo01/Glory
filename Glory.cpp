@@ -32,6 +32,12 @@
 //        ss << "]";
 //        return ss.str();
 //    }
+//
+//    string toStringForWaitQueue() const {
+//        stringstream ss;
+//        ss << id << (isForeground ? "F" : "B") << ":" << remainingTime;
+//        return ss.str();
+//    }
 //};
 //
 //class DynamicQueue {
@@ -79,8 +85,13 @@
 //        lock_guard<mutex> lock(mtx);
 //        for (auto it = waitQueue.begin(); it != waitQueue.end();) {
 //            if (--it->second->remainingTime <= 0) {
-//                it->second->isForeground ? fgProcesses.push_back(it->second) : bgProcesses.push_back(it->second);
-//                if (!it->second->isForeground) bgCount++;
+//                if (it->second->isForeground) {
+//                    fgProcesses.push_back(it->second);
+//                }
+//                else {
+//                    bgProcesses.push_back(it->second);
+//                    bgCount++;
+//                }
 //                it = waitQueue.erase(it);
 //            }
 //            else {
@@ -93,21 +104,29 @@
 //        lock_guard<mutex> lock(mtx);
 //        cout << "Running: [" << bgCount.load() << "B]\n";
 //        cout << "---------------------------\n";
-//        cout << "DQ: (bottom) ";
-//        for (const auto& proc : bgProcesses) {
-//            cout << proc->toString() << " ";
+//        cout << "DQ: ";
+//        if (!bgProcesses.empty()) {
+//            cout << "(bottom) ";
+//            for (const auto& proc : bgProcesses) {
+//                cout << proc->toString() << " ";
+//            }
+//            cout << "\nP => ";
 //        }
-//        cout << "\nP => ";
-//        for (const auto& proc : fgProcesses) {
-//            cout << proc->toString() << " ";
+//        if (!fgProcesses.empty()) {
+//            for (const auto& proc : fgProcesses) {
+//                cout << proc->toString() << " ";
+//            }
+//            cout << "(top)\n";
 //        }
-//        cout << "(top)\n";
+//        else {
+//            cout << "(bottom/top)\n";
+//        }
 //        cout << "---------------------------\n";
-//        cout << "WQ: ";
+//        cout << "WQ: [";
 //        for (const auto& wp : waitQueue) {
-//            cout << wp.second->toString() << " - Remaining Time: " << wp.second->remainingTime << "s; ";
+//            cout << wp.second->toStringForWaitQueue() << " ";
 //        }
-//        cout << "\n...\n";
+//        cout << "]\n...\n";
 //    }
 //};
 //
@@ -118,6 +137,7 @@
 //        shared_ptr<Process> proc = make_shared<Process>(processId++, true, line);
 //        dq.enqueue(proc);
 //        this_thread::sleep_for(chrono::seconds(interval));
+//        if (processId % 3 == 0) dq.simulateSleep(processId - 1, 5);
 //        dq.printQueue();
 //    }
 //}
@@ -139,14 +159,13 @@
 //    dq.enqueue(monitorProc);
 //
 //    thread shellThread(shellProcess, ref(dq), 1); // Simulate shell processing
-//    thread monitorThread(monitorProcess, ref(dq), 2);
+//    thread monitorThread(monitorProcess, ref(dq), 2); // Monitor background tasks
 //
 //    shellThread.join();
 //    monitorThread.detach();
 //
 //    return 0;
 //}
-
 
 //2-1.Dynamic Queueing
 //#include <iostream>
@@ -334,150 +353,97 @@
 //}
 
 // 2-3	CLI
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <queue>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include <chrono>
-#include <regex>
-#include <functional>
-
-using namespace std;
-
-mutex mtx;
-condition_variable cv;
-queue<function<void()>> fgTasks;  // Foreground tasks
-atomic<bool> quit(false);
-atomic<int> bgTaskCount(0);  // Count of background tasks
-
-// Utility functions
-int gcd(int a, int b) {
-    while (b != 0) {
-        int t = b;
-        b = a % b;
-        a = t;
-    }
-    return a;
-}
-
-int countPrimes(int limit) {
-    vector<bool> sieve(limit + 1, true);
-    int count = 0;
-    for (int p = 2; p <= limit; p++) {
-        if (sieve[p]) {
-            count++;
-            for (int multiple = 2 * p; multiple <= limit; multiple += p)
-                sieve[multiple] = false;
-        }
-    }
-    return count;
-}
-
-long long sum(int n) {
-    long long total = 0;
-    for (int i = 1; i <= n; i++) {
-        total = (total + i) % 1000000;
-    }
-    return total;
-}
-
-void echo(const string& message) {
-    cout << message << endl;
-}
-
-void dummy() {}
-
-// Task execution
-void executeTask(const string& command, const vector<string>& args, bool isBackground) {
-    auto task = [command, args]() {
-        if (command == "echo" && !args.empty()) {
-            echo(args[0]);
-        }
-        else if (command == "dummy") {
-            dummy();
-        }
-        else if (command == "gcd" && args.size() >= 2) {
-            cout << "GCD: " << gcd(stoi(args[0]), stoi(args[1])) << endl;
-        }
-        else if (command == "prime" && !args.empty()) {
-            cout << "Primes count: " << countPrimes(stoi(args[0])) << endl;
-        }
-        else if (command == "sum" && !args.empty()) {
-            cout << "Sum: " << sum(stoi(args[0])) << endl;
-        }
-        };
-
-    if (isBackground) {
-        bgTaskCount++;
-        thread bgThread([task]() {
-            task();
-            bgTaskCount--;
-            });
-        bgThread.detach();
-        cout << "Running: [" << bgTaskCount.load() << "B]" << endl;
-    }
-    else {
-        lock_guard<mutex> lock(mtx);
-        fgTasks.push(task);
-        cv.notify_one();
-    }
-}
-
-// Foreground task processor
-void processForegroundTasks() {
-    while (!quit) {
-        function<void()> task;
-        {
-            unique_lock<mutex> lock(mtx);
-            cv.wait(lock, [] { return !fgTasks.empty() || quit; });
-            if (quit && fgTasks.empty()) break;
-            task = fgTasks.front();
-            fgTasks.pop();
-        }
-        task();
-    }
-    cout << "prompt> ...";
-}
-
-int main() {
-    ifstream file("commands.txt");
-    string line;
-
-    // Start the foreground task processor
-    thread fgThread(processForegroundTasks);
-
-    // Command parsing and dispatching
-    regex commandPattern(R"((\&)?(\w+)(?:\s+(\S+))*)");
-    while (getline(file, line)) {
-        smatch matches;
-        if (regex_match(line, matches, commandPattern)) {
-            bool isBackground = matches[1].matched;
-            string command = matches[2];
-            vector<string> args;
-            if (matches[3].matched) {
-                istringstream argStream(matches[3]);
-                string arg;
-                while (argStream >> arg) {
-                    args.push_back(arg);
-                }
-            }
-            executeTask(command, args, isBackground);
-        }
-        this_thread::sleep_for(chrono::seconds(1)); // Simulate command interval
-    }
-
-    // Clean up
-    quit = true;
-    cv.notify_all();
-    fgThread.join();
-    return 0;
-}
-
+//#include <iostream>
+//#include <fstream>
+//#include <sstream>
+//#include <thread>
+//#include <mutex>
+//#include <condition_variable>
+//#include <vector>
+//#include <queue>
+//#include <functional>
+//#include <chrono>
+//#include <atomic>
+//
+//using namespace std;
+//
+//mutex coutMutex;
+//condition_variable cv;
+//atomic<bool> isRunning(true);
+//
+//class Process {
+//public:
+//    string command;
+//    bool isForeground;
+//    int period;
+//    int duration;
+//
+//    Process(string cmd, bool fg, int per, int dur)
+//        : command(cmd), isForeground(fg), period(per), duration(dur) {}
+//
+//    void execute() {
+//        lock_guard<mutex> lock(coutMutex);
+//        cout << command.substr(5) << endl; // 실행 로직, 여기서는 간단히 echo만 처리
+//    }
+//};
+//
+//void worker(queue<shared_ptr<Process>>& workQueue) {
+//    while (isRunning && !workQueue.empty()) {
+//        auto process = workQueue.front();
+//        workQueue.pop();
+//        if (process) {
+//            process->execute();
+//            this_thread::sleep_for(chrono::seconds(process->period)); // 주어진 주기만큼 대기
+//        }
+//    }
+//}
+//
+//void parseAndExecute(const string& commandLine) {
+//    istringstream stream(commandLine);
+//    string command, segment;
+//    queue<shared_ptr<Process>> workQueue;
+//
+//    while (getline(stream, segment, ';')) {
+//        bool isForeground = segment.find('&') == string::npos;
+//        string cmd = isForeground ? segment : segment.substr(1); // '&' 제거
+//        int period = 1; // 기본 주기
+//        int duration = 50; // 기본 지속 시간
+//        auto process = make_shared<Process>(cmd, isForeground, period, duration);
+//        workQueue.push(process);
+//    }
+//
+//    thread th([&workQueue] {
+//        while (!workQueue.empty()) {
+//            auto process = workQueue.front();
+//            workQueue.pop();
+//            if (process && process->isForeground) {
+//                process->execute();
+//                this_thread::sleep_for(chrono::seconds(process->period));
+//            }
+//            else {
+//                // 배경 작업 실행
+//                thread bgThread(&Process::execute, process);
+//                bgThread.detach();
+//            }
+//        }
+//        });
+//    th.join();
+//}
+//
+//int main() {
+//    string commandLine;
+//    while (true) {
+//        cout << "prompt> ";
+//        getline(cin, commandLine);
+//        if (commandLine == "exit") {
+//            isRunning = false;
+//            cv.notify_all();
+//            break;
+//        }
+//        parseAndExecute(commandLine);
+//    }
+//    return 0;
+//}
 
 
 
